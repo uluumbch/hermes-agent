@@ -1046,6 +1046,11 @@ class APIServerAdapter(BasePlatformAdapter):
         gateway_session_key: Optional[str] = None,
         enabled_toolsets_override: Optional[List[str]] = None,
         composio_user_id_override: Optional[str] = None,
+        model_override: Optional[str] = None,
+        provider_override: Optional[str] = None,
+        api_key_override: Optional[str] = None,
+        base_url_override: Optional[str] = None,
+        api_mode_override: Optional[str] = None,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -1069,6 +1074,32 @@ class APIServerAdapter(BasePlatformAdapter):
         runtime_kwargs = _resolve_runtime_agent_kwargs()
         reasoning_config = GatewayRunner._load_reasoning_config()
         model = _resolve_gateway_model()
+
+        # First-party provider override (LibreChatHermes): when the server selects an admin-managed
+        # model it sends the provider's decrypted credentials for THIS turn, so any pooled gateway can
+        # serve that model. The presence of api_key_override is the signal to re-point the LLM client;
+        # we then clear command/args (those are for CLI-based providers, not first-party API keys).
+        # All overrides are optional and absent overrides preserve the gateway's configured default.
+        # SECURITY: never log api_key_override.
+        if api_key_override:
+            runtime_kwargs["api_key"] = api_key_override
+            runtime_kwargs["command"] = None
+            runtime_kwargs["args"] = []
+            if provider_override:
+                runtime_kwargs["provider"] = provider_override
+            if base_url_override:
+                runtime_kwargs["base_url"] = base_url_override
+            # api_mode pins the wire protocol; when the server doesn't specify one, let the agent
+            # auto-detect from base_url (set None) rather than inherit the default provider's mode.
+            runtime_kwargs["api_mode"] = api_mode_override or None
+            logger.warning(
+                "api_server: per-turn provider override (provider=%s base_url=%s model=%s)",
+                provider_override or runtime_kwargs.get("provider"),
+                base_url_override or runtime_kwargs.get("base_url"),
+                model_override or model,
+            )
+        if model_override:
+            model = model_override
 
         user_config = _load_gateway_config()
         enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
@@ -1777,6 +1808,11 @@ class APIServerAdapter(BasePlatformAdapter):
             allowed_skills_override=self._normalize_str_list(body.get("allowed_skills")),
             composio_user_id_override=self._normalize_composio_user_id(body.get("composio_user_id")),
             composio_toolkits_override=self._normalize_str_list(body.get("composio_toolkits")),
+            model_override=self._normalize_composio_user_id(body.get("model")),
+            provider_override=self._normalize_composio_user_id(body.get("provider")),
+            api_key_override=self._normalize_composio_user_id(body.get("api_key")),
+            base_url_override=self._normalize_composio_user_id(body.get("base_url")),
+            api_mode_override=self._normalize_composio_user_id(body.get("api_mode")),
         )
         effective_session_id = result.get("session_id") if isinstance(result, dict) else session_id
         final_response = result.get("final_response", "") if isinstance(result, dict) else ""
@@ -1872,6 +1908,11 @@ class APIServerAdapter(BasePlatformAdapter):
                     allowed_skills_override=self._normalize_str_list(body.get("allowed_skills")),
                     composio_user_id_override=self._normalize_composio_user_id(body.get("composio_user_id")),
                     composio_toolkits_override=self._normalize_str_list(body.get("composio_toolkits")),
+                    model_override=self._normalize_composio_user_id(body.get("model")),
+                    provider_override=self._normalize_composio_user_id(body.get("provider")),
+                    api_key_override=self._normalize_composio_user_id(body.get("api_key")),
+                    base_url_override=self._normalize_composio_user_id(body.get("base_url")),
+                    api_mode_override=self._normalize_composio_user_id(body.get("api_mode")),
                 )
                 final_response = result.get("final_response", "") if isinstance(result, dict) else ""
                 effective_session_id = result.get("session_id", session_id) if isinstance(result, dict) else session_id
@@ -3717,6 +3758,11 @@ class APIServerAdapter(BasePlatformAdapter):
         allowed_skills_override: Optional[List[str]] = None,
         composio_user_id_override: Optional[str] = None,
         composio_toolkits_override: Optional[List[str]] = None,
+        model_override: Optional[str] = None,
+        provider_override: Optional[str] = None,
+        api_key_override: Optional[str] = None,
+        base_url_override: Optional[str] = None,
+        api_mode_override: Optional[str] = None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -3754,6 +3800,11 @@ class APIServerAdapter(BasePlatformAdapter):
                     gateway_session_key=gateway_session_key,
                     enabled_toolsets_override=enabled_toolsets_override,
                     composio_user_id_override=composio_user_id_override,
+                    model_override=model_override,
+                    provider_override=provider_override,
+                    api_key_override=api_key_override,
+                    base_url_override=base_url_override,
+                    api_mode_override=api_mode_override,
                 )
                 if agent_ref is not None:
                     agent_ref[0] = agent
@@ -3886,6 +3937,12 @@ class APIServerAdapter(BasePlatformAdapter):
         allowed_skills = self._normalize_str_list(body.get("allowed_skills"))
         composio_user_id = self._normalize_composio_user_id(body.get("composio_user_id"))
         composio_toolkits = self._normalize_str_list(body.get("composio_toolkits"))
+        # First-party provider override for this run (see _create_agent). All optional strings.
+        model_override = self._normalize_composio_user_id(body.get("model"))
+        provider_override = self._normalize_composio_user_id(body.get("provider"))
+        api_key_override = self._normalize_composio_user_id(body.get("api_key"))
+        base_url_override = self._normalize_composio_user_id(body.get("base_url"))
+        api_mode_override = self._normalize_composio_user_id(body.get("api_mode"))
 
         # Accept explicit conversation_history from the request body.
         # Precedence: explicit conversation_history > previous_response_id.
@@ -3977,6 +4034,11 @@ class APIServerAdapter(BasePlatformAdapter):
                     gateway_session_key=gateway_session_key,
                     enabled_toolsets_override=allowed_toolsets,
                     composio_user_id_override=composio_user_id,
+                    model_override=model_override,
+                    provider_override=provider_override,
+                    api_key_override=api_key_override,
+                    base_url_override=base_url_override,
+                    api_mode_override=api_mode_override,
                 )
                 self._active_run_agents[run_id] = agent
 
