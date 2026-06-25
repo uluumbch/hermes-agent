@@ -1007,6 +1007,20 @@ class APIServerAdapter(BasePlatformAdapter):
     # Agent creation helper
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _normalize_allowed_toolsets(value: Any) -> Optional[List[str]]:
+        """Coerce a request-supplied toolset allowlist to a clean ``list[str]``.
+
+        Returns ``None`` (meaning "no per-request restriction — use the gateway
+        default") when the value is absent, not a list, or empty after cleaning.
+        Lenient by design: bad entries are dropped rather than rejected, so a
+        malformed client field can never break a chat turn.
+        """
+        if not isinstance(value, list):
+            return None
+        cleaned = [t.strip() for t in value if isinstance(t, str) and t.strip()]
+        return cleaned or None
+
     def _create_agent(
         self,
         ephemeral_system_prompt: Optional[str] = None,
@@ -1016,6 +1030,7 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_start_callback=None,
         tool_complete_callback=None,
         gateway_session_key: Optional[str] = None,
+        enabled_toolsets_override: Optional[List[str]] = None,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -1042,6 +1057,22 @@ class APIServerAdapter(BasePlatformAdapter):
 
         user_config = _load_gateway_config()
         enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
+
+        # Per-session restriction (LibreChatHermes): when the caller supplies an
+        # allowlist, narrow the gateway's configured toolsets to that subset. We
+        # only ever *restrict* — a client can never grant a toolset the gateway
+        # isn't configured for. ``None`` (the default) preserves legacy behaviour.
+        if enabled_toolsets_override is not None:
+            allow = set(enabled_toolsets_override)
+            restricted = [t for t in enabled_toolsets if t in allow]
+            # warning-level: a per-session capability restriction is security-relevant and should be
+            # visible in default deployments (gateway stderr defaults to WARNING).
+            logger.warning(
+                "api_server: per-session toolset restriction %s -> %s",
+                enabled_toolsets,
+                restricted,
+            )
+            enabled_toolsets = restricted
 
         max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
 
@@ -1569,6 +1600,7 @@ class APIServerAdapter(BasePlatformAdapter):
             ephemeral_system_prompt=system_prompt,
             session_id=session_id,
             gateway_session_key=gateway_session_key,
+            enabled_toolsets_override=self._normalize_allowed_toolsets(body.get("allowed_toolsets")),
         )
         effective_session_id = result.get("session_id") if isinstance(result, dict) else session_id
         final_response = result.get("final_response", "") if isinstance(result, dict) else ""
@@ -1660,6 +1692,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     stream_delta_callback=_delta,
                     tool_progress_callback=_tool_progress,
                     gateway_session_key=gateway_session_key,
+                    enabled_toolsets_override=self._normalize_allowed_toolsets(body.get("allowed_toolsets")),
                 )
                 final_response = result.get("final_response", "") if isinstance(result, dict) else ""
                 effective_session_id = result.get("session_id", session_id) if isinstance(result, dict) else session_id
@@ -3501,6 +3534,7 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_complete_callback=None,
         agent_ref: Optional[list] = None,
         gateway_session_key: Optional[str] = None,
+        enabled_toolsets_override: Optional[List[str]] = None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -3533,6 +3567,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     tool_start_callback=tool_start_callback,
                     tool_complete_callback=tool_complete_callback,
                     gateway_session_key=gateway_session_key,
+                    enabled_toolsets_override=enabled_toolsets_override,
                 )
                 if agent_ref is not None:
                     agent_ref[0] = agent
@@ -3661,6 +3696,7 @@ class APIServerAdapter(BasePlatformAdapter):
 
         instructions = body.get("instructions")
         previous_response_id = body.get("previous_response_id")
+        allowed_toolsets = self._normalize_allowed_toolsets(body.get("allowed_toolsets"))
 
         # Accept explicit conversation_history from the request body.
         # Precedence: explicit conversation_history > previous_response_id.
@@ -3750,6 +3786,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     stream_delta_callback=_text_cb,
                     tool_progress_callback=event_cb,
                     gateway_session_key=gateway_session_key,
+                    enabled_toolsets_override=allowed_toolsets,
                 )
                 self._active_run_agents[run_id] = agent
 
