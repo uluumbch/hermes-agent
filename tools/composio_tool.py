@@ -44,6 +44,12 @@ _MAX_RESULT_CHARS = 60_000
 # Cache one Composio client per API key for the process lifetime.
 _CLIENT_CACHE: dict = {}
 
+# Short-TTL cache of each user's ACTIVE connected toolkits, so a turn that
+# searches/executes several times doesn't hit Composio's connected-accounts
+# endpoint each call. Keyed by user_id -> (monotonic_ts, set[str]).
+_CONNECTED_CACHE: dict = {}
+_CONNECTED_TTL = 20.0
+
 
 def _api_key() -> str:
     return (os.getenv("COMPOSIO_API_KEY") or "").strip()
@@ -97,6 +103,40 @@ def _toolkit_of_slug(slug: str) -> str:
     is approximate; the current catalog (googledrive/notion/googlesheets) is safe.
     """
     return slug.split("_", 1)[0].lower() if slug else ""
+
+
+def _connected_toolkits(client: Any, user_id: str) -> "Optional[set]":
+    """Toolkit slugs the user has an ACTIVE Composio connection to.
+
+    Returns ``None`` when the lookup fails so callers degrade gracefully (don't
+    hide every tool over a transient error) rather than block all access.
+    Short-TTL cached per user.
+    """
+    import time
+
+    now = time.monotonic()
+    cached = _CONNECTED_CACHE.get(user_id)
+    if cached and now - cached[0] < _CONNECTED_TTL:
+        return cached[1]
+    try:
+        resp = client.connected_accounts.list(user_ids=[user_id])
+    except Exception as exc:
+        logger.warning("composio: list connections failed for %s: %s", user_id, exc)
+        return None
+    items = getattr(resp, "items", None) or []
+    out = set()
+    for acct in items:
+        status = str(getattr(acct, "status", "") or "").upper()
+        # Only ACTIVE connections are usable; INITIATED/EXPIRED/FAILED are not.
+        if status and not status.startswith("ACTIV"):
+            continue
+        toolkit = getattr(getattr(acct, "toolkit", None), "slug", None) or getattr(
+            acct, "toolkit_slug", None
+        )
+        if toolkit:
+            out.add(str(toolkit).lower())
+    _CONNECTED_CACHE[user_id] = (now, out)
+    return out
 
 
 def check_composio_available() -> bool:
@@ -188,6 +228,29 @@ def composio_search_tools(args: dict, **_kw) -> str:
             {"tools": [], "note": "None of the requested toolkits are enabled for you."}
         )
 
+    # Only surface tools for apps the user has actually CONNECTED — an
+    # admin-granted but unconnected app has no usable tools (execute would fail
+    # with "no connected account"). This keeps the agent from believing an app is
+    # connected just because it was granted.
+    connected = _connected_toolkits(client, user_id)
+    if connected is not None:
+        effective = [t for t in toolkits if t in connected]
+        not_connected = [t for t in toolkits if t not in connected]
+    else:
+        effective = toolkits
+        not_connected = []
+    if not effective:
+        return json.dumps(
+            {
+                "tools": [],
+                "not_connected": not_connected or toolkits,
+                "note": (
+                    "None of these apps are connected yet. Tell the user to connect them "
+                    "in Settings → Third-Party Apps before you can use them."
+                ),
+            }
+        )
+
     limit = args.get("limit")
     try:
         limit = max(1, min(int(limit), 30)) if limit is not None else 10
@@ -196,7 +259,7 @@ def composio_search_tools(args: dict, **_kw) -> str:
 
     try:
         raw = client.tools.get_raw_composio_tools(
-            toolkits=[t.upper() for t in toolkits],
+            toolkits=[t.upper() for t in effective],
             search=query or None,
             limit=limit,
         )
@@ -205,7 +268,15 @@ def composio_search_tools(args: dict, **_kw) -> str:
         return _err(f"Composio tool search failed: {exc}")
 
     tools = [_tool_summary(t) for t in (raw or [])]
-    return _cap(json.dumps({"tools": tools, "toolkits": toolkits}))
+    return _cap(
+        json.dumps(
+            {
+                "tools": tools,
+                "connected_toolkits": effective,
+                "not_connected": not_connected,
+            }
+        )
+    )
 
 
 def composio_execute_tool(args: dict, **_kw) -> str:
@@ -225,6 +296,15 @@ def composio_execute_tool(args: dict, **_kw) -> str:
     if toolkit not in allowed:
         return _err(
             f"Tool '{slug}' belongs to toolkit '{toolkit}', which is not enabled for you."
+        )
+
+    # Block execution against an app the user hasn't connected — fail fast with a
+    # clear, actionable message instead of Composio's "no connected account".
+    connected = _connected_toolkits(client, user_id)
+    if connected is not None and toolkit not in connected:
+        return _err(
+            f"'{toolkit}' is not connected. Ask the user to connect it in "
+            "Settings → Third-Party Apps, then retry."
         )
 
     arguments = args.get("arguments")
