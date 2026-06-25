@@ -143,6 +143,9 @@ def _tool_summary(tool: Any) -> dict:
 
 
 def _response_to_dict(resp: Any) -> dict:
+    # composio.tools.execute returns a plain dict ({data, error, successful, ...}).
+    if isinstance(resp, dict):
+        return resp
     dump = getattr(resp, "model_dump", None)
     if callable(dump):
         try:
