@@ -1308,6 +1308,28 @@ class APIServerAdapter(BasePlatformAdapter):
                     "configured": _toolset_has_keys(name, config),
                     "tools": tools,
                 })
+
+            # LibreChatHermes: surface configured MCP servers as toolsets so they
+            # appear in the admin per-user toggle list. Each MCP server registers a
+            # toolset under its bare name (see toolsets.py); it's enabled for all
+            # agents by default, and per-user restriction rides on the same name.
+            existing = {entry["name"] for entry in data}
+            for srv_name, srv_cfg in (config.get("mcp_servers") or {}).items():
+                if srv_name in existing or not isinstance(srv_cfg, dict):
+                    continue
+                try:
+                    srv_tools = sorted(set(resolve_toolset(srv_name)))
+                except Exception:
+                    srv_tools = []
+                data.append({
+                    "name": srv_name,
+                    "label": f"MCP · {srv_name}",
+                    "description": str(srv_cfg.get("url") or "MCP server"),
+                    "enabled": True,
+                    "configured": True,
+                    "mcp": True,
+                    "tools": srv_tools,
+                })
         except Exception:
             logger.exception("GET /v1/toolsets failed")
             return web.json_response(
@@ -1320,6 +1342,128 @@ class APIServerAdapter(BasePlatformAdapter):
             "platform": "api_server",
             "data": data,
         })
+
+    # ------------------------------------------------------------------
+    # /api/mcp-servers — admin MCP management (LibreChatHermes)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _mask_mcp_headers(cfg: Dict[str, Any]) -> Dict[str, str]:
+        """Header keys with masked values — never leak secrets (e.g. Bearer tokens)."""
+        headers = cfg.get("headers")
+        if not isinstance(headers, dict):
+            return {}
+        return {str(k): "••••••" for k in headers}
+
+    async def _reload_mcp_servers(self) -> List[str]:
+        """Disconnect + rediscover MCP servers from fresh config. Returns connected names."""
+        loop = asyncio.get_running_loop()
+        from tools.mcp_tool import shutdown_mcp_servers, discover_mcp_tools, _servers, _lock
+
+        await loop.run_in_executor(None, shutdown_mcp_servers)
+        await loop.run_in_executor(None, discover_mcp_tools)
+        with _lock:
+            return sorted(_servers.keys())
+
+    def _mcp_servers_payload(self) -> List[Dict[str, Any]]:
+        from hermes_cli.config import load_config
+        from tools.mcp_tool import _servers, _lock
+
+        servers = (load_config().get("mcp_servers") or {})
+        with _lock:
+            connected = set(_servers.keys())
+        out: List[Dict[str, Any]] = []
+        for name, cfg in servers.items():
+            if not isinstance(cfg, dict):
+                continue
+            out.append({
+                "name": name,
+                "url": cfg.get("url"),
+                "transport": cfg.get("transport") or ("sse" if str(cfg.get("url", "")).endswith("/sse") else "http"),
+                "headersMasked": self._mask_mcp_headers(cfg),
+                "connected": name in connected,
+            })
+        return out
+
+    async def _handle_list_mcp_servers(self, request: "web.Request") -> "web.Response":
+        """GET /api/mcp-servers — list configured MCP servers (secrets masked)."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            return web.json_response({"object": "list", "data": self._mcp_servers_payload()})
+        except Exception:
+            logger.exception("GET /api/mcp-servers failed")
+            return web.json_response(_openai_error("Failed to list MCP servers", err_type="server_error"), status=500)
+
+    async def _handle_create_mcp_server(self, request: "web.Request") -> "web.Response":
+        """POST /api/mcp-servers — add/update a remote (URL) MCP server, then live-reload.
+
+        Remote-only by policy: stdio (command/args) servers are rejected so the
+        admin UI can't trigger arbitrary local command execution in the gateway.
+        """
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response(_openai_error("Invalid JSON"), status=400)
+
+        name = str(body.get("name") or "").strip()
+        url = str(body.get("url") or "").strip()
+        if not name:
+            return web.json_response(_openai_error("'name' is required", code="invalid_name"), status=400)
+        if body.get("command") or body.get("args"):
+            return web.json_response(
+                _openai_error("Only remote (url) MCP servers can be added here", code="stdio_not_allowed"),
+                status=400,
+            )
+        if not url.startswith("https://"):
+            return web.json_response(_openai_error("'url' must be an https:// URL", code="invalid_url"), status=400)
+
+        server_config: Dict[str, Any] = {"url": url}
+        transport = body.get("transport")
+        if transport in ("http", "sse"):
+            server_config["transport"] = transport
+        headers = body.get("headers")
+        if isinstance(headers, dict) and headers:
+            server_config["headers"] = {str(k): str(v) for k, v in headers.items()}
+        timeout = body.get("timeout")
+        if isinstance(timeout, int) and timeout > 0:
+            server_config["timeout"] = timeout
+
+        try:
+            from hermes_cli.mcp_config import _save_mcp_server
+            saved = await asyncio.get_running_loop().run_in_executor(None, _save_mcp_server, name, server_config)
+        except Exception:
+            logger.exception("POST /api/mcp-servers save failed")
+            return web.json_response(_openai_error("Failed to save MCP server", err_type="server_error"), status=500)
+        if not saved:
+            return web.json_response(
+                _openai_error("Server rejected by validation (suspicious config)", code="rejected"),
+                status=400,
+            )
+
+        connected = await self._reload_mcp_servers()
+        return web.json_response({"name": name, "connected": name in connected})
+
+    async def _handle_delete_mcp_server(self, request: "web.Request") -> "web.Response":
+        """DELETE /api/mcp-servers/{name} — remove a server, then live-reload."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        name = request.match_info.get("name", "")
+        try:
+            from hermes_cli.mcp_config import _remove_mcp_server
+            existed = await asyncio.get_running_loop().run_in_executor(None, _remove_mcp_server, name)
+        except Exception:
+            logger.exception("DELETE /api/mcp-servers failed")
+            return web.json_response(_openai_error("Failed to remove MCP server", err_type="server_error"), status=500)
+        if not existed:
+            return web.json_response(_openai_error("MCP server not found", code="not_found"), status=404)
+        await self._reload_mcp_servers()
+        return web.json_response({"deleted": name})
 
     # ------------------------------------------------------------------
     # /api/sessions — thin client/session resource API
@@ -4216,6 +4360,10 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_get("/v1/capabilities", self._handle_capabilities)
             self._app.router.add_get("/v1/skills", self._handle_skills)
             self._app.router.add_get("/v1/toolsets", self._handle_toolsets)
+            # MCP server management (LibreChatHermes admin) — remote-URL servers only.
+            self._app.router.add_get("/api/mcp-servers", self._handle_list_mcp_servers)
+            self._app.router.add_post("/api/mcp-servers", self._handle_create_mcp_server)
+            self._app.router.add_delete("/api/mcp-servers/{name}", self._handle_delete_mcp_server)
             # Session/client control surface (thin wrappers over SessionDB + _run_agent)
             self._app.router.add_get("/api/sessions", self._handle_list_sessions)
             self._app.router.add_post("/api/sessions", self._handle_create_session)
