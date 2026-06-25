@@ -1021,6 +1021,20 @@ class APIServerAdapter(BasePlatformAdapter):
         cleaned = [t.strip() for t in value if isinstance(t, str) and t.strip()]
         return cleaned or None
 
+    @staticmethod
+    def _normalize_composio_user_id(value: Any) -> Optional[str]:
+        """Coerce a request-supplied Composio user id to a clean ``str`` or ``None``.
+
+        Composio scopes connected third-party accounts to this id (the
+        LibreChatHermes DB user id). ``None`` means "no Composio this turn" — the
+        ``composio`` toolset is then not offered. Lenient: a non-string or blank
+        value can never break a chat turn.
+        """
+        if not isinstance(value, str):
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
     def _create_agent(
         self,
         ephemeral_system_prompt: Optional[str] = None,
@@ -1031,6 +1045,7 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_complete_callback=None,
         gateway_session_key: Optional[str] = None,
         enabled_toolsets_override: Optional[List[str]] = None,
+        composio_user_id_override: Optional[str] = None,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -1073,6 +1088,20 @@ class APIServerAdapter(BasePlatformAdapter):
                 restricted,
             )
             enabled_toolsets = restricted
+
+        # Composio third-party apps (LibreChatHermes): when the server signals this
+        # turn carries a Composio user id (admin enabled it for the user), offer the
+        # per-user ``composio`` meta-tool toolset. This is an explicit, server-driven
+        # grant independent of the toolset allowlist above (Composio has its own admin
+        # opt-in), so we append AFTER the restrict step. The toolset's tools resolve the
+        # user + toolkit allowlist from session context at dispatch time; the registry
+        # check_fn only gates global availability (COMPOSIO_API_KEY + package present).
+        if composio_user_id_override and "composio" not in enabled_toolsets:
+            enabled_toolsets = enabled_toolsets + ["composio"]
+            logger.warning(
+                "api_server: composio toolset enabled for this turn (user_id=%s)",
+                composio_user_id_override,
+            )
 
         max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
 
@@ -1746,6 +1775,8 @@ class APIServerAdapter(BasePlatformAdapter):
             gateway_session_key=gateway_session_key,
             enabled_toolsets_override=self._normalize_str_list(body.get("allowed_toolsets")),
             allowed_skills_override=self._normalize_str_list(body.get("allowed_skills")),
+            composio_user_id_override=self._normalize_composio_user_id(body.get("composio_user_id")),
+            composio_toolkits_override=self._normalize_str_list(body.get("composio_toolkits")),
         )
         effective_session_id = result.get("session_id") if isinstance(result, dict) else session_id
         final_response = result.get("final_response", "") if isinstance(result, dict) else ""
@@ -1839,6 +1870,8 @@ class APIServerAdapter(BasePlatformAdapter):
                     gateway_session_key=gateway_session_key,
                     enabled_toolsets_override=self._normalize_str_list(body.get("allowed_toolsets")),
                     allowed_skills_override=self._normalize_str_list(body.get("allowed_skills")),
+                    composio_user_id_override=self._normalize_composio_user_id(body.get("composio_user_id")),
+                    composio_toolkits_override=self._normalize_str_list(body.get("composio_toolkits")),
                 )
                 final_response = result.get("final_response", "") if isinstance(result, dict) else ""
                 effective_session_id = result.get("session_id", session_id) if isinstance(result, dict) else session_id
@@ -3682,6 +3715,8 @@ class APIServerAdapter(BasePlatformAdapter):
         gateway_session_key: Optional[str] = None,
         enabled_toolsets_override: Optional[List[str]] = None,
         allowed_skills_override: Optional[List[str]] = None,
+        composio_user_id_override: Optional[str] = None,
+        composio_toolkits_override: Optional[List[str]] = None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -3705,6 +3740,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 session_key=gateway_session_key or session_id or "",
                 session_id=session_id or "",
                 allowed_skills=",".join(allowed_skills_override or []),
+                composio_user_id=composio_user_id_override or "",
+                composio_toolkits=",".join(composio_toolkits_override or []),
             )
             try:
                 agent = self._create_agent(
@@ -3716,6 +3753,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     tool_complete_callback=tool_complete_callback,
                     gateway_session_key=gateway_session_key,
                     enabled_toolsets_override=enabled_toolsets_override,
+                    composio_user_id_override=composio_user_id_override,
                 )
                 if agent_ref is not None:
                     agent_ref[0] = agent
@@ -3846,6 +3884,8 @@ class APIServerAdapter(BasePlatformAdapter):
         previous_response_id = body.get("previous_response_id")
         allowed_toolsets = self._normalize_str_list(body.get("allowed_toolsets"))
         allowed_skills = self._normalize_str_list(body.get("allowed_skills"))
+        composio_user_id = self._normalize_composio_user_id(body.get("composio_user_id"))
+        composio_toolkits = self._normalize_str_list(body.get("composio_toolkits"))
 
         # Accept explicit conversation_history from the request body.
         # Precedence: explicit conversation_history > previous_response_id.
@@ -3936,6 +3976,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     tool_progress_callback=event_cb,
                     gateway_session_key=gateway_session_key,
                     enabled_toolsets_override=allowed_toolsets,
+                    composio_user_id_override=composio_user_id,
                 )
                 self._active_run_agents[run_id] = agent
 
@@ -3978,6 +4019,8 @@ class APIServerAdapter(BasePlatformAdapter):
                             platform="api_server",
                             session_key=approval_session_key,
                             allowed_skills=",".join(allowed_skills or []),
+                            composio_user_id=composio_user_id or "",
+                            composio_toolkits=",".join(composio_toolkits or []),
                         )
                         register_gateway_notify(approval_session_key, _approval_notify)
                         r = agent.run_conversation(

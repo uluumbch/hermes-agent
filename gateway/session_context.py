@@ -66,6 +66,13 @@ _SESSION_MESSAGE_ID: ContextVar = ContextVar("HERMES_SESSION_MESSAGE_ID", defaul
 # Read via get_allowed_skill_names() in agent/skill_utils.py.
 _SESSION_ALLOWED_SKILLS: ContextVar = ContextVar("HERMES_SESSION_ALLOWED_SKILLS", default=_UNSET)
 
+# Composio third-party apps (LibreChatHermes): the per-user identity Composio
+# scopes connected accounts to, and the comma-joined toolkit allowlist this user
+# may reach this turn. Both empty = Composio toolset is not offered (the
+# composio_tool check_fn gates on HERMES_SESSION_COMPOSIO_USER_ID being set).
+_SESSION_COMPOSIO_USER_ID: ContextVar = ContextVar("HERMES_SESSION_COMPOSIO_USER_ID", default=_UNSET)
+_SESSION_COMPOSIO_TOOLKITS: ContextVar = ContextVar("HERMES_SESSION_COMPOSIO_TOOLKITS", default=_UNSET)
+
 # Cron auto-delivery vars — set per-job in run_job() so concurrent jobs
 # don't clobber each other's delivery targets.
 _CRON_AUTO_DELIVER_PLATFORM: ContextVar = ContextVar("HERMES_CRON_AUTO_DELIVER_PLATFORM", default=_UNSET)
@@ -83,6 +90,8 @@ _VAR_MAP = {
     "HERMES_SESSION_ID": _SESSION_ID,
     "HERMES_SESSION_MESSAGE_ID": _SESSION_MESSAGE_ID,
     "HERMES_SESSION_ALLOWED_SKILLS": _SESSION_ALLOWED_SKILLS,
+    "HERMES_SESSION_COMPOSIO_USER_ID": _SESSION_COMPOSIO_USER_ID,
+    "HERMES_SESSION_COMPOSIO_TOOLKITS": _SESSION_COMPOSIO_TOOLKITS,
     "HERMES_CRON_AUTO_DELIVER_PLATFORM": _CRON_AUTO_DELIVER_PLATFORM,
     "HERMES_CRON_AUTO_DELIVER_CHAT_ID": _CRON_AUTO_DELIVER_CHAT_ID,
     "HERMES_CRON_AUTO_DELIVER_THREAD_ID": _CRON_AUTO_DELIVER_THREAD_ID,
@@ -116,6 +125,8 @@ def set_session_vars(
     message_id: str = "",
     cwd: str = "",
     allowed_skills: str = "",
+    composio_user_id: str = "",
+    composio_toolkits: str = "",
 ) -> list:
     """Set all session context variables and return reset tokens.
 
@@ -138,6 +149,8 @@ def set_session_vars(
         _SESSION_ID.set(session_id),
         _SESSION_MESSAGE_ID.set(message_id),
         _SESSION_ALLOWED_SKILLS.set(allowed_skills),
+        _SESSION_COMPOSIO_USER_ID.set(composio_user_id),
+        _SESSION_COMPOSIO_TOOLKITS.set(composio_toolkits),
     ]
     try:
         from agent.runtime_cwd import set_session_cwd
@@ -170,6 +183,8 @@ def clear_session_vars(tokens: list) -> None:
         _SESSION_ID,
         _SESSION_MESSAGE_ID,
         _SESSION_ALLOWED_SKILLS,
+        _SESSION_COMPOSIO_USER_ID,
+        _SESSION_COMPOSIO_TOOLKITS,
     ):
         var.set("")
     try:
