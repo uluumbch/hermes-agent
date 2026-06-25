@@ -388,6 +388,34 @@ def get_disabled_skill_names(platform: str | None = None) -> Set[str]:
     return global_disabled
 
 
+def get_allowed_skill_names() -> "Set[str] | None":
+    """Per-turn skill allowlist set by the gateway (LibreChatHermes).
+
+    Reads the comma-joined ``HERMES_SESSION_ALLOWED_SKILLS`` session value. Returns
+    ``None`` when unset/empty — meaning **no restriction** (inherit every skill), so
+    CLI/cron/tests and un-configured users behave exactly as upstream. The
+    ``get_session_env`` os.environ fallback also makes this directly testable.
+    """
+    from gateway.session_context import get_session_env
+
+    raw = get_session_env("HERMES_SESSION_ALLOWED_SKILLS") or os.getenv(
+        "HERMES_SESSION_ALLOWED_SKILLS", ""
+    )
+    names = {part.strip() for part in raw.split(",") if part.strip()}
+    return names or None
+
+
+def skill_is_allowed(name: str, frontmatter_name: str | None = None) -> bool:
+    """True when *name* (or its frontmatter name) is permitted this turn.
+
+    Always True when there is no active allowlist (the common case).
+    """
+    allowed = get_allowed_skill_names()
+    if allowed is None:
+        return True
+    return name in allowed or (frontmatter_name is not None and frontmatter_name in allowed)
+
+
 def _normalize_string_set(values) -> Set[str]:
     if values is None:
         return set()

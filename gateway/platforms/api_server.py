@@ -1008,8 +1008,8 @@ class APIServerAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _normalize_allowed_toolsets(value: Any) -> Optional[List[str]]:
-        """Coerce a request-supplied toolset allowlist to a clean ``list[str]``.
+    def _normalize_str_list(value: Any) -> Optional[List[str]]:
+        """Coerce a request-supplied string allowlist (toolsets or skills) to a clean ``list[str]``.
 
         Returns ``None`` (meaning "no per-request restriction — use the gateway
         default") when the value is absent, not a list, or empty after cleaning.
@@ -1600,7 +1600,8 @@ class APIServerAdapter(BasePlatformAdapter):
             ephemeral_system_prompt=system_prompt,
             session_id=session_id,
             gateway_session_key=gateway_session_key,
-            enabled_toolsets_override=self._normalize_allowed_toolsets(body.get("allowed_toolsets")),
+            enabled_toolsets_override=self._normalize_str_list(body.get("allowed_toolsets")),
+            allowed_skills_override=self._normalize_str_list(body.get("allowed_skills")),
         )
         effective_session_id = result.get("session_id") if isinstance(result, dict) else session_id
         final_response = result.get("final_response", "") if isinstance(result, dict) else ""
@@ -1692,7 +1693,8 @@ class APIServerAdapter(BasePlatformAdapter):
                     stream_delta_callback=_delta,
                     tool_progress_callback=_tool_progress,
                     gateway_session_key=gateway_session_key,
-                    enabled_toolsets_override=self._normalize_allowed_toolsets(body.get("allowed_toolsets")),
+                    enabled_toolsets_override=self._normalize_str_list(body.get("allowed_toolsets")),
+                    allowed_skills_override=self._normalize_str_list(body.get("allowed_skills")),
                 )
                 final_response = result.get("final_response", "") if isinstance(result, dict) else ""
                 effective_session_id = result.get("session_id", session_id) if isinstance(result, dict) else session_id
@@ -3535,6 +3537,7 @@ class APIServerAdapter(BasePlatformAdapter):
         agent_ref: Optional[list] = None,
         gateway_session_key: Optional[str] = None,
         enabled_toolsets_override: Optional[List[str]] = None,
+        allowed_skills_override: Optional[List[str]] = None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -3557,6 +3560,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 chat_id=session_id or "",
                 session_key=gateway_session_key or session_id or "",
                 session_id=session_id or "",
+                allowed_skills=",".join(allowed_skills_override or []),
             )
             try:
                 agent = self._create_agent(
@@ -3696,7 +3700,8 @@ class APIServerAdapter(BasePlatformAdapter):
 
         instructions = body.get("instructions")
         previous_response_id = body.get("previous_response_id")
-        allowed_toolsets = self._normalize_allowed_toolsets(body.get("allowed_toolsets"))
+        allowed_toolsets = self._normalize_str_list(body.get("allowed_toolsets"))
+        allowed_skills = self._normalize_str_list(body.get("allowed_skills"))
 
         # Accept explicit conversation_history from the request body.
         # Precedence: explicit conversation_history > previous_response_id.
@@ -3828,6 +3833,7 @@ class APIServerAdapter(BasePlatformAdapter):
                         session_tokens = set_session_vars(
                             platform="api_server",
                             session_key=approval_session_key,
+                            allowed_skills=",".join(allowed_skills or []),
                         )
                         register_gateway_notify(approval_session_key, _approval_notify)
                         r = agent.run_conversation(

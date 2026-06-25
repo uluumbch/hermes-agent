@@ -20,6 +20,7 @@ from agent.skill_utils import (
     extract_skill_conditions,
     extract_skill_description,
     get_all_skills_dirs,
+    get_allowed_skill_names,
     get_disabled_skill_names,
     iter_skill_index_files,
     parse_frontmatter,
@@ -1240,6 +1241,9 @@ def build_skills_system_prompt(
         or ""
     )
     disabled = get_disabled_skill_names(_platform_hint or None)
+    # Per-turn skill allowlist (LibreChatHermes): None = no restriction. Part of the
+    # cache key below so a per-session allowlist never returns a stale cached index.
+    allowed = get_allowed_skill_names()
     cache_key = (
         str(skills_dir.resolve()),
         tuple(str(d) for d in external_dirs),
@@ -1247,6 +1251,7 @@ def build_skills_system_prompt(
         tuple(sorted(str(ts) for ts in (available_toolsets or set()))),
         _platform_hint,
         tuple(sorted(disabled)),
+        tuple(sorted(allowed)) if allowed is not None else None,
         tuple(sorted(compact_categories or ())),
     )
     with _SKILLS_PROMPT_CACHE_LOCK:
@@ -1274,6 +1279,8 @@ def build_skills_system_prompt(
                 continue
             if frontmatter_name in disabled or skill_name in disabled:
                 continue
+            if allowed is not None and frontmatter_name not in allowed and skill_name not in allowed:
+                continue
             if not _skill_should_show(
                 entry.get("conditions") or {},
                 available_tools,
@@ -1298,6 +1305,8 @@ def build_skills_system_prompt(
                 continue
             skill_name = entry["skill_name"]
             if entry["frontmatter_name"] in disabled or skill_name in disabled:
+                continue
+            if allowed is not None and entry["frontmatter_name"] not in allowed and skill_name not in allowed:
                 continue
             if not _skill_should_show(
                 extract_skill_conditions(frontmatter),
@@ -1353,6 +1362,8 @@ def build_skills_system_prompt(
                 if frontmatter_name in seen_skill_names:
                     continue
                 if frontmatter_name in disabled or skill_name in disabled:
+                    continue
+                if allowed is not None and frontmatter_name not in allowed and skill_name not in allowed:
                     continue
                 if not _skill_should_show(
                     extract_skill_conditions(frontmatter),

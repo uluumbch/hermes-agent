@@ -559,6 +559,15 @@ def _get_disabled_skill_names() -> Set[str]:
     return get_disabled_skill_names()
 
 
+def _allowed(name: str, frontmatter_name: str | None = None) -> bool:
+    """Per-turn skill allowlist check (LibreChatHermes). True when unrestricted.
+
+    Delegates to ``agent.skill_utils.skill_is_allowed``.
+    """
+    from agent.skill_utils import skill_is_allowed
+    return skill_is_allowed(name, frontmatter_name)
+
+
 def _get_session_platform() -> str:
     """Resolve the current platform from gateway session context.
 
@@ -645,6 +654,10 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
                 if name in seen_names:
                     continue
                 if name in disabled:
+                    continue
+                # Per-turn allowlist (LibreChatHermes): hide skills not enabled for
+                # this session so the model isn't shown what it can't load.
+                if not _allowed(name, skill_dir.name):
                     continue
 
                 description = frontmatter.get("description", "")
@@ -1185,6 +1198,22 @@ def skill_view(
                         f"Skill '{resolved_name}' is disabled. "
                         "Enable it with `hermes skills` or inspect the files directly on disk."
                     ),
+                },
+                ensure_ascii=False,
+            )
+
+        # Per-turn allowlist (LibreChatHermes): hard-gate loading of skills not
+        # enabled for this session/user. No-op when there is no active allowlist.
+        from agent.skill_utils import skill_is_allowed
+
+        if not skill_is_allowed(resolved_name, skill_md.parent.name):
+            logger.warning(
+                "skills_tool: blocked skill_view of '%s' — not enabled for this session", resolved_name
+            )
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": f"Skill '{resolved_name}' is not enabled for this session.",
                 },
                 ensure_ascii=False,
             )
