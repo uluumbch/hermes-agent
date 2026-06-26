@@ -3603,18 +3603,25 @@ def run_conversation(
                     r'</?(?:REASONING_SCRATCHPAD|think|reasoning)>', '', _think_text
                 ).strip()
                 # For subagents: relay first line to parent display (existing behaviour).
-                # For all agents with a structured callback: emit reasoning.available event.
                 first_line = _think_text.split('\n')[0][:80] if _think_text else ""
                 if first_line and getattr(agent, '_delegate_depth', 0) > 0:
                     try:
                         agent.tool_progress_callback("_thinking", first_line)
                     except Exception:
                         pass
-                elif _think_text:
-                    try:
-                        agent.tool_progress_callback("reasoning.available", "_thinking", _think_text[:500], None)
-                    except Exception:
-                        pass
+                else:
+                    # Emit reasoning.available ONLY when the model produced genuine
+                    # reasoning (a structured reasoning field or a
+                    # <think>/<REASONING_SCRATCHPAD> block) — never the answer text
+                    # itself. Previously this sent the first 500 chars of the whole
+                    # response, so models without separate reasoning surfaced the
+                    # start of their own reply in the "Reasoning" panel.
+                    _reasoning_only = (agent._extract_reasoning(assistant_message) or "").strip()
+                    if _reasoning_only:
+                        try:
+                            agent.tool_progress_callback("reasoning.available", "_thinking", _reasoning_only[:500], None)
+                        except Exception:
+                            pass
             
             # Check for incomplete <REASONING_SCRATCHPAD> (opened but never closed)
             # This means the model ran out of output tokens mid-reasoning — retry up to 2 times
