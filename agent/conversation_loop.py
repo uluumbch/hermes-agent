@@ -3619,7 +3619,9 @@ def run_conversation(
                     _reasoning_only = (agent._extract_reasoning(assistant_message) or "").strip()
                     if _reasoning_only:
                         try:
-                            agent.tool_progress_callback("reasoning.available", "_thinking", _reasoning_only[:500], None)
+                            # Send the full reasoning — it's a single end-of-turn
+                            # emission rendered in the UI panel, not a short preview.
+                            agent.tool_progress_callback("reasoning.available", "_thinking", _reasoning_only, None)
                         except Exception:
                             pass
             
